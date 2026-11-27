@@ -9,7 +9,7 @@ from pathlib import Path
 
 DEFAULT_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
-    "1xQ3C2Ms1InD6h6YGO9l8ntMiy8q9pJwkrg2frX52vXw/edit?gid=0#gid=0"
+    "1-mmEHXNE1P1Qqp516Qk6AHFg9tbTix6l5HetJSp09Fo/edit?usp=sharing"
 )
 
 # 1-based Excel column indices matching the target sheet layout
@@ -81,10 +81,15 @@ VALID_LONG_TLDS = {
 
 IGNORED_EMAIL_DOMAINS = (
     "example.com", "example.org", "domain.com", "email.com", "test.com",
-    "ejemplo.com", "ejemplo.es", "above.com", "sedo.com", "bodis.com",
-    "afternic.com", "hugedomains.com", "dan.com", "domainprivacy.com",
-    "greensock.com", "centralapp.com", "stride-site.com",
-    "webador.com", "webador.es", "webador.fr", "conversia.es",
+    "ejemplo.com", "ejemplo.es", "tudominio.com", "correo.com", "xxxxxx.com",
+    "above.com", "sedo.com", "bodis.com", "afternic.com", "hugedomains.com",
+    "dan.com", "domainprivacy.com", "greensock.com", "centralapp.com",
+    "stride-site.com", "webador.com", "webador.es", "webador.fr",
+    "conversia.es", "gdprlocal.com", "delegadoproteccion.com", "aepd.es",
+    "atico34.com", "bricol.es", "prodyd.es", "forlopd.es", "lock4data.es",
+    "stripe.com", "rentalcars.com", "booking.com", "flexmyroom.com",
+    "entradasatualcance.com", "wedocreatives.com", "imtsdesign.es",
+    "com-hotel.com", "jouwweb.nl", "verlacarta.es", "dinevomenu.com",
     "wixpress.com", "sentry.io", "sentry-next.wixpress.com", "ingest.sentry.io",
     "wordpress.org", "wordpress.com", "w3.org", "schema.org",
     "googleapis.com", "gstatic.com", "googleusercontent.com",
@@ -102,6 +107,17 @@ IGNORED_EMAIL_EXACT = {
 IGNORED_EMAIL_PREFIXES = (
     "noreply@", "no-reply@", "mailer-daemon@", "donotreply@", "do-not-reply@",
     "u003e", "protection@", "abuse@", "postmaster@",
+    "dpd@", "dpo@", "lopd@", "rgpd@", "privacidad@", "privacy@",
+    "protecciondatos@", "protecciondedatos@", "rrhh@", "rr.hh@",
+    "cv@", "empleo@", "trabajo@", "notificaciones@", "calidad@",
+    "groupnotification@", "fra-groupnotification@", "hoteliers@", "faqs@",
+)
+
+SKIP_SCRAPE_DOMAINS = (
+    "booking.com", "getyourguide.com", "tripadvisor.", "thefork.",
+    "eltenedor.", "ubereats.", "just-eat.", "glovoapp.", "expedia.",
+    "agoda.", "hotels.com", "airbnb.", "com-hotel.com",
+    "verlacarta.es", "dinevomenu.com",
 )
 
 SOCIAL_DOMAINS = (
@@ -136,9 +152,10 @@ NOISE_SOCIAL_PATTERNS = (
 
 SUBPAGE_KEYWORDS = (
     "contact", "contacto", "contacta", "contactar",
-    "aviso-legal", "aviso", "legal",
+    "aviso-legal", "aviso", "legal", "legal-notice", "imprint", "impressum",
     "privacidad", "privacy", "politica-de-privacidad", "politica-privacidad",
-    "reserva", "reservas", "about", "nosotros", "quienes-somos",
+    "reserva", "reservas", "reservar", "booking",
+    "about", "nosotros", "quienes-somos", "location", "ubicacion", "donde-estamos",
 )
 
 

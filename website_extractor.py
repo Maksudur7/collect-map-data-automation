@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import logging
 import re
 import urllib.parse
@@ -23,6 +24,7 @@ from config import (
     IGNORED_EMAIL_PREFIXES,
     INVALID_EMAIL_EXTENSIONS,
     NOISE_SOCIAL_PATTERNS,
+    SKIP_SCRAPE_DOMAINS,
     SOCIAL_DOMAINS,
     SOCIAL_URL_REGEX,
     SUBPAGE_KEYWORDS,
@@ -84,6 +86,12 @@ def _is_valid_email(email: str) -> bool:
     local, _, domain = low.partition("@")
     if not local or not domain or "." not in domain:
         return False
+    if local.startswith(("dpo.", "dpd.", "lopd.", "rgpd.")):
+        return False
+    if any(k in domain for k in ("casino", "poker", "togel", "gacor", "betting")):
+        return False
+    if re.fullmatch(r"x+", local):
+        return False
     if any(domain == d or domain.endswith("." + d) for d in IGNORED_EMAIL_DOMAINS):
         return False
     tld = domain.rsplit(".", 1)[-1]
@@ -129,6 +137,9 @@ def _rank_emails(emails: list[str], site_host: str) -> list[str]:
     return sorted(deduped, key=_score)
 
 
+DUMMY_PHONE_SEQUENCES = {"123456789", "987654321", "012345678", "1234567890"}
+
+
 def normalize_phone(raw: str | None) -> str | None:
     """Normalize phone strings into clean international digits (e.g. +34965204233)."""
     if not raw:
@@ -138,11 +149,15 @@ def normalize_phone(raw: str | None) -> str | None:
     digits = re.sub(r"[^\d+]", "", s)
     if digits.startswith("00"):
         digits = "+" + digits[2:]
-    # Remove any stray '+' not at start
     if "+" in digits[1:]:
         digits = digits[0] + digits[1:].replace("+", "")
     pure = digits.lstrip("+")
     if len(pure) < 9 or len(pure) > 15:
+        return None
+    # Reject invalid leading zero country codes (e.g. +04067529214) and dummy digits
+    if digits.startswith("+0") or (not digits.startswith("+") and pure.startswith("0")):
+        return None
+    if pure in DUMMY_PHONE_SEQUENCES or re.search(r"(\d)\1{5,}", pure):
         return None
     # Handle 9-digit Spanish local numbers cleanly
     if not digits.startswith("+") and len(pure) == 9 and pure[0] in ("6", "7", "8", "9"):
@@ -152,6 +167,10 @@ def normalize_phone(raw: str | None) -> str | None:
     elif not digits.startswith("+"):
         digits = "+" + pure
     return digits
+
+
+def _is_spanish_local_phone(phone: str) -> bool:
+    return bool(re.fullmatch(r"\+34[6789]\d{8}", phone))
 
 
 def merge_phones(*phone_groups: list[str] | str | None) -> list[str]:
@@ -171,14 +190,43 @@ def merge_phones(*phone_groups: list[str] | str | None) -> list[str]:
     return merged
 
 
-def normalize_social_url(raw_url: str) -> str | None:
+def merge_phones_smart(
+    maps_phone: str | None,
+    web_phones: list[str] | None,
+    address: str | None = None,
+) -> list[str]:
+    """Prioritize verified Google Maps phone and filter website extras against spam/foreign noise."""
+    is_spain = bool(
+        (address and "spain" in address.lower())
+        or (maps_phone and normalize_phone(maps_phone) and normalize_phone(maps_phone).startswith("+34"))
+    )
+    filtered_web: list[str] = []
+    for raw in web_phones or []:
+        norm = normalize_phone(raw)
+        if not norm:
+            continue
+        # When operating on Spanish businesses, only accept valid Spanish numbers from websites
+        if is_spain and not _is_spanish_local_phone(norm):
+            continue
+        filtered_web.append(norm)
+    return merge_phones(maps_phone, filtered_web)
+
+
+SPAM_SOCIAL_KEYWORDS = ("slot", "casino", "poker", "togel", "gacor", "judi", "cuan", "betting")
+
+
+def normalize_social_url(raw_url: str, allow_groups: bool = False) -> str | None:
     """Normalize and filter social media URLs to genuine business profile/page links."""
     if not raw_url:
         return None
-    url = raw_url.strip().rstrip("\\/,;\"'")
+    url = html_lib.unescape(raw_url).strip()
+    url = re.sub(r"(?:&quot|&amp|[\\/,;\"'])+$", "", url)
     if not url.lower().startswith(("http://", "https://")):
         return None
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return None
     host = parsed.netloc.lower()
     if not any(host == d or host.endswith("." + d) for d in SOCIAL_DOMAINS):
         return None
@@ -187,14 +235,23 @@ def normalize_social_url(raw_url: str) -> str | None:
         return None
 
     path = parsed.path.rstrip("/")
-    # Reject bare social homepages like https://www.instagram.com or https://facebook.com
-    if not path or path in ("/home", "/es", "/en"):
+    path_low = path.lower()
+    # Reject bare homepages, Facebook pixel endpoint (/tr), and injected spam groups
+    if not path or path_low in ("/home", "/es", "/en", "/tr"):
+        return None
+    if "/groups/" in path_low and not allow_groups:
+        return None
+    decoded_path = urllib.parse.unquote(path)
+    if any(k in decoded_path.lower() for k in SPAM_SOCIAL_KEYWORDS):
+        return None
+    # Reject non-Latin script spam paths (e.g. Thai/Arabic/CJK gambling injections)
+    if not allow_groups and re.search(r"[^\x00-\x7F\u00C0-\u024F]", decoded_path):
         return None
 
     # Keep identifying query parameters (e.g. Facebook profile.php?id=...)
     qs = urllib.parse.parse_qs(parsed.query)
     keep_qs = {}
-    if "id" in qs and "profile.php" in path.lower():
+    if "id" in qs and "profile.php" in path_low:
         keep_qs["id"] = qs["id"][0]
     clean_query = urllib.parse.urlencode(keep_qs)
 
@@ -234,7 +291,10 @@ def _extract_from_html(html: str, page_url: str) -> tuple[list[str], list[str], 
         elif low.startswith("tel:"):
             phones.append(href[4:].split("?")[0])
         elif "wa.me/" in low or "api.whatsapp.com/send" in low or "whatsapp.com/send" in low:
-            wa_parsed = urllib.parse.urlparse(href)
+            try:
+                wa_parsed = urllib.parse.urlparse(href)
+            except ValueError:
+                continue
             qs = urllib.parse.parse_qs(wa_parsed.query)
             if "phone" in qs and qs["phone"]:
                 phones.append(qs["phone"][0])
@@ -243,12 +303,15 @@ def _extract_from_html(html: str, page_url: str) -> tuple[list[str], list[str], 
                 if m_wa:
                     phones.append(m_wa.group(1))
         else:
-            abs_url = urllib.parse.urljoin(page_url, href)
+            try:
+                abs_url = urllib.parse.urljoin(page_url, href)
+                parsed = urllib.parse.urlparse(abs_url)
+            except ValueError:
+                continue
             norm_soc = normalize_social_url(abs_url)
             if norm_soc:
                 socials.append(norm_soc)
                 continue
-            parsed = urllib.parse.urlparse(abs_url)
             if parsed.scheme in ("http", "https"):
                 cand_host = parsed.netloc.lower().removeprefix("www.")
                 if cand_host == base_host and not abs_url.lower().endswith(INVALID_EMAIL_EXTENSIONS):
@@ -261,9 +324,10 @@ def _extract_from_html(html: str, page_url: str) -> tuple[list[str], list[str], 
     # Visible text scan avoids glued DOM tags like '.comDATOS'
     visible_text = soup.get_text(" ", strip=True)
     emails.extend(EMAIL_REGEX.findall(visible_text))
-    # Also scan raw HTML for JS-embedded emails/social URLs (e.g. Wix/Elementor JSON)
-    emails.extend(EMAIL_REGEX.findall(html))
-    for match in SOCIAL_URL_REGEX.findall(html):
+    # Unescape HTML entities & JSON-LD escaped slashes before regex scanning
+    unescaped_html = html_lib.unescape(html).replace("\\/", "/")
+    emails.extend(EMAIL_REGEX.findall(unescaped_html))
+    for match in SOCIAL_URL_REGEX.findall(unescaped_html):
         norm_soc = normalize_social_url(match)
         if norm_soc:
             socials.append(norm_soc)
@@ -340,10 +404,18 @@ def _fetch_html_sync(session: requests.Session, url: str) -> tuple[str | None, s
 
 def _scrape_website_http_sync(row: int, website_url: str) -> tuple[WebsiteResult, bool]:
     """Scrape homepage + up to 5 contact/legal subpages via HTTP. Returns (result, needs_browser)."""
-    norm_self_social = normalize_social_url(website_url)
+    norm_self_social = normalize_social_url(website_url, allow_groups=True)
     if norm_self_social:
         # Maps website itself points to Facebook/Instagram/etc.
         return WebsiteResult(row=row, website=website_url, social_links=[norm_self_social]), False
+
+    try:
+        site_netloc = urllib.parse.urlparse(website_url).netloc.lower()
+    except ValueError:
+        site_netloc = ""
+    if any(d in site_netloc for d in SKIP_SCRAPE_DOMAINS):
+        # Skip third-party OTA/delivery directories so OTA contacts aren't attributed to the venue
+        return WebsiteResult(row=row, website=website_url), False
 
     session = requests.Session()
     session.headers.update(BROWSER_HEADERS)
@@ -383,6 +455,20 @@ def _scrape_website_http_sync(row: int, website_url: str) -> tuple[WebsiteResult
         ),
         needs_browser,
     )
+
+
+async def _safe_content(page) -> str:
+    """Read page HTML safely even if a delayed client redirect occurs."""
+    for _ in range(2):
+        try:
+            return await page.content()
+        except Exception as exc:
+            if "navigating" in str(exc).lower():
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                await page.wait_for_timeout(800)
+                continue
+            raise
+    return await page.content()
 
 
 async def _safe_goto(page, url: str, timeout_ms: int = 20000) -> None:
@@ -439,14 +525,14 @@ async def _scrape_websites_playwright(
                         try:
                             await _safe_goto(page, url, timeout_ms=20000)
                             await page.wait_for_timeout(1500)
-                            html = await page.content()
+                            html = await _safe_content(page)
                             final_url = page.url
                             e, p, s, subpages = _extract_from_html(html, final_url)
-                            for sub_url in _prioritize_subpages(subpages)[:2]:
+                            for sub_url in _prioritize_subpages(subpages)[:3]:
                                 try:
                                     await _safe_goto(page, sub_url, timeout_ms=15000)
                                     await page.wait_for_timeout(800)
-                                    sub_html = await page.content()
+                                    sub_html = await _safe_content(page)
                                     e2, p2, s2, _ = _extract_from_html(sub_html, page.url)
                                     e.extend(e2)
                                     p.extend(p2)
@@ -497,7 +583,11 @@ async def extract_websites_batch(
 
     async def _run_http(row: int, url: str) -> None:
         async with sem:
-            res, needs_browser = await asyncio.to_thread(_scrape_website_http_sync, row, url)
+            try:
+                res, needs_browser = await asyncio.to_thread(_scrape_website_http_sync, row, url)
+            except Exception as exc:
+                res = WebsiteResult(row=row, website=url, error=f"{type(exc).__name__}: {exc}")
+                needs_browser = False
             if needs_browser and use_browser_fallback:
                 fallback_queue.append((row, url))
             else:
